@@ -115,6 +115,8 @@ if [[ -e /etc/openvpn/server.conf ]]; then
 			read -p "Client name: " -e -i newclient CLIENT
 			cd /etc/openvpn/easy-rsa/
 			./easyrsa build-client-full $CLIENT nopass
+			# Make new rules for client
+			echo 'push "redirect-gateway def1 bypass-dhcp" '>> /etc/openvpn/ccd/$CLIENT
 			# Generates the custom client.ovpn
 			newclient "$CLIENT"
 			echo ""
@@ -161,9 +163,9 @@ if [[ -e /etc/openvpn/server.conf ]]; then
 				if pgrep firewalld; then
 					# Using both permanent and not permanent rules to avoid a firewalld reload.
 					firewall-cmd --zone=public --remove-port=$PORT/udp
-					firewall-cmd --zone=trusted --remove-source=10.8.0.0/24
+					firewall-cmd --zone=trusted --remove-source=$INTERNAL_NET/24
 					firewall-cmd --permanent --zone=public --remove-port=$PORT/udp
-					firewall-cmd --permanent --zone=trusted --remove-source=10.8.0.0/24
+					firewall-cmd --permanent --zone=trusted --remove-source=$INTERNAL_NET/24
 				fi
 				if iptables -L -n | grep -qE 'REJECT|DROP'; then
 					if [[ "$PROTOCOL" = 'udp' ]]; then
@@ -171,10 +173,10 @@ if [[ -e /etc/openvpn/server.conf ]]; then
 					else
 						iptables -D INPUT -p tcp --dport $PORT -j ACCEPT
 					fi
-					iptables -D FORWARD -s 10.8.0.0/24 -j ACCEPT
+					iptables -D FORWARD -s $INTERNAL_NET/24 -j ACCEPT
 					iptables-save > $IPTABLES
 				fi
-				iptables -t nat -D POSTROUTING -o $NIC -s 10.8.0.0/24 -j MASQUERADE
+				iptables -t nat -D POSTROUTING -o $NIC -s $INTERNAL_NET/24 -j MASQUERADE
 				iptables-save > $IPTABLES
 				if hash sestatus 2>/dev/null; then
 					if sestatus | grep "Current mode" | grep -qs "enforcing"; then
@@ -224,6 +226,9 @@ else
 	echo ""
 	echo "What port do you want for OpenVPN?"
 	read -p "Port: " -e -i 1194 PORT
+	echo ""
+	echo "What intertal network do you want for OpenVPN?"
+	read -p "Network: " -e -i 10.8.0.0 INTERNAL_NET
 	echo ""
 	echo "What protocol do you want for OpenVPN?"
 	echo "Unless UDP is blocked, you should not use TCP (unnecessarily slower)"
@@ -490,7 +495,8 @@ WantedBy=multi-user.target" > /etc/systemd/system/iptables.service
 	cp pki/ca.crt pki/private/ca.key dh.pem pki/issued/$SERVER_NAME.crt pki/private/$SERVER_NAME.key /etc/openvpn/easy-rsa/pki/crl.pem /etc/openvpn
 	# Make cert revocation list readable for non-root
 	chmod 644 /etc/openvpn/crl.pem
-
+	mkdir /etc/openvpn/ccd
+	
 	# Generate server.conf
 	echo "port $PORT" > /etc/openvpn/server.conf
 	if [[ "$PROTOCOL" = 'UDP' ]]; then
@@ -505,7 +511,7 @@ persist-key
 persist-tun
 keepalive 10 120
 topology subnet
-server 10.8.0.0 255.255.255.0
+server $INTERNAL_NET 255.255.255.0
 ifconfig-pool-persist ipp.txt" >> /etc/openvpn/server.conf
 	# DNS resolvers
 	case $DNS in
@@ -547,7 +553,7 @@ ifconfig-pool-persist ipp.txt" >> /etc/openvpn/server.conf
 		echo 'push "dhcp-option DNS 176.103.130.131"' >> /etc/openvpn/server.conf
 		;;
 	esac
-echo 'push "redirect-gateway def1 bypass-dhcp" '>> /etc/openvpn/server.conf
+#echo 'push "redirect-gateway def1 bypass-dhcp" '>> /etc/openvpn/server.conf
 echo "crl-verify crl.pem
 ca ca.crt
 cert $SERVER_NAME.crt
@@ -560,7 +566,8 @@ tls-server
 tls-version-min 1.2
 tls-cipher TLS-DHE-RSA-WITH-AES-128-GCM-SHA256
 status openvpn.log
-verb 3" >> /etc/openvpn/server.conf
+verb 3
+client-config-dir ccd" >> /etc/openvpn/server.conf
 
 	# Create the sysctl configuration file if needed (mainly for Arch Linux)
 	if [[ ! -e $SYSCTL ]]; then
@@ -575,7 +582,7 @@ verb 3" >> /etc/openvpn/server.conf
 	# Avoid an unneeded reboot
 	echo 1 > /proc/sys/net/ipv4/ip_forward
 	# Set NAT for the VPN subnet
-	iptables -t nat -A POSTROUTING -o $NIC -s 10.8.0.0/24 -j MASQUERADE
+	iptables -t nat -A POSTROUTING -o $NIC -s $INTERNAL_NET/24 -j MASQUERADE
 	# Save persitent iptables rules
 	iptables-save > $IPTABLES
 	if pgrep firewalld; then
@@ -589,8 +596,8 @@ verb 3" >> /etc/openvpn/server.conf
 			firewall-cmd --zone=public --add-port=$PORT/tcp
 			firewall-cmd --permanent --zone=public --add-port=$PORT/tcp
 		fi
-		firewall-cmd --zone=trusted --add-source=10.8.0.0/24
-		firewall-cmd --permanent --zone=trusted --add-source=10.8.0.0/24
+		firewall-cmd --zone=trusted --add-source=$INTERNAL_NET/24
+		firewall-cmd --permanent --zone=trusted --add-source=$INTERNAL_NET/24
 	fi
 	if iptables -L -n | grep -qE 'REJECT|DROP'; then
 		# If iptables has at least one REJECT rule, we asume this is needed.
@@ -601,7 +608,7 @@ verb 3" >> /etc/openvpn/server.conf
 		elif [[ "$PROTOCOL" = 'TCP' ]]; then
 			iptables -I INPUT -p tcp --dport $PORT -j ACCEPT
 		fi
-		iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT
+		iptables -I FORWARD -s $INTERNAL_NET/24 -j ACCEPT
 		iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 		# Save persitent OpenVPN rules
         iptables-save > $IPTABLES
@@ -692,6 +699,8 @@ tls-cipher TLS-DHE-RSA-WITH-AES-128-GCM-SHA256
 setenv opt block-outside-dns
 verb 3" >> /etc/openvpn/client-template.txt
 
+	# Make new rules for client
+	echo 'push "redirect-gateway def1 bypass-dhcp" '>> /etc/openvpn/ccd/$CLIENT
 	# Generate the custom client.ovpn
 	newclient "$CLIENT"
 	echo ""
